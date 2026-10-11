@@ -2,6 +2,7 @@ import type { MemoryPluginCapability } from "openclaw/plugin-sdk/memory-host-cor
 import type { OpenClawPluginToolContext } from "openclaw/plugin-sdk/plugin-entry";
 import type { SessionMetadata, SessionSnippetMessage } from "./session-projector.js";
 import type { ChatType } from "./config.js";
+import type { RetrievalTimings } from "./retrieval-timing.js";
 export type MemoryPluginRuntimeContract = NonNullable<MemoryPluginCapability["runtime"]>;
 type ManagerLookup = Awaited<ReturnType<MemoryPluginRuntimeContract["getMemorySearchManager"]>>;
 export type MemorySearchManagerContract = NonNullable<ManagerLookup["manager"]>;
@@ -35,6 +36,8 @@ export type CorpusSearchOptions = Omit<NonNullable<Parameters<MemorySearchManage
     maxSnippetChars?: number;
     sessionFilter?: SessionSearchFilter;
     requestContext?: MemoryRequestContext;
+    /** Internal, per-call numeric timing sink; never part of tool input/output. */
+    timings?: RetrievalTimings;
 };
 export type MemoryEmbeddingProbeResult = Awaited<ReturnType<MemorySearchManagerContract["probeEmbeddingAvailability"]>>;
 export type MemorySyncParams = Parameters<NonNullable<MemorySearchManagerContract["sync"]>>[0];

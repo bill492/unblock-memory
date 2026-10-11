@@ -80,6 +80,31 @@ judging time, candidate/result counts and outcomes (including partial failures).
 These counters are separate from automatic `memoryWhisperer` and internal `vector`
 retrieval; no query or evidence text is recorded.
 
+Both `memorySearch` and `memoryWhisperer` also report per-call stage measurements:
+
+- `setupMs`: credentials and manager initialization (manual search also includes input validation).
+- `queueWaitMs`: waiting for admission behind other index operations.
+- `metadataMs` / `metadataReloads`: session metadata refresh and evidence filtering; reload count is
+  present only when the session corpus is selected and refresh completes.
+- `storeSetupMs`: opening or obtaining the QMD store.
+- `bm25Ms` and `vectorMs`: complete sequential candidate-discovery lanes.
+- Inside `vectorMs`, QMD reports `vectorIndexCheckMs`, `vectorScopeMs`, `embeddingMs`,
+  `vectorScanMs`, `hydrationMs`, and `vectorMappingMs`. Repeated scan/hydration stages are summed;
+  `vectorScanAttempts` counts native scans. Embedding time includes any lazy model/context setup.
+- `passageMs`: rendering merged candidates; `candidatePrepMs`: eligibility checks and deduplication
+  before disclosure to TypeSafe. `judgeMs` covers the concurrent candidate judgments, not their sum.
+- `vectorOtherMs` and `retrievalOtherMs` expose time outside measured child stages. `otherMs` accounts
+  for the remaining manual tool execution. Whisperer stages overlap, so no additive whole-run
+  residual is reported for it. Parent durations must not be added to their child durations.
+
+Each measurement includes lifetime totals/sample counts and p50/p95 over up to 256 recent calls.
+`slowestRecent` contains the five slowest calls **within that same window**, each with its outcome
+and numeric breakdown, so stages can be correlated without combining unrelated percentiles.
+With 12 samples, nearest-rank p95 is the largest sample. Whole-tool time excludes Gateway transport.
+Failed/cancelled calls retain completed stages and in-flight durations through cancellation;
+unexecuted stages and unfinished native trace stages are absent, not zero. No query, passage,
+path, credential or session identifier is retained; samples are process-local and reset on recreation.
+
 Corpora and session filters select evidence; they are not audience ACLs. Normal
 tools can access this agent's configured non-skill corpora, not just its current
 chat. Only index material suitable for the agent's tool callers. Per-feature

@@ -4,6 +4,7 @@ import { ApiQueryGenerator, QueryApiError, queryConversation } from "./query-gen
 import { judgeTrainingInput, TRAINING_GATE_THRESHOLD } from "./training-gate.js";
 import { QueryInputBudgetError } from "./query-contract.js";
 import { searchMemory, memoryPassageId } from "./memory-search.js";
+import { timeStage } from "./retrieval-timing.js";
 export function registerMemoryWhisperer(api, runtime, config, typesafe, diagnostics) {
     if (!config.enabled || !typesafe.enabled)
         return;
@@ -53,7 +54,7 @@ export function registerMemoryWhisperer(api, runtime, config, typesafe, diagnost
         const run = async () => {
             const conversation = queryConversation(event.prompt, event.messages);
             stage = "credentials";
-            const apiKey = await resolveTypeSafeApiKey(typesafe);
+            const apiKey = await timeStage("setupMs", measurement, signal, () => resolveTypeSafeApiKey(typesafe));
             if (signal.aborted)
                 return;
             if (!apiKey) {
@@ -112,7 +113,7 @@ export function registerMemoryWhisperer(api, runtime, config, typesafe, diagnost
                     measurement.generationMs = performance.now() - generationStarted;
                 }
                 stage = "retrieval";
-                const { manager } = await runtime.getMemorySearchManager({ cfg: api.config, agentId });
+                const { manager } = await timeStage("setupMs", measurement, signal, () => runtime.getMemorySearchManager({ cfg: api.config, agentId }));
                 if (signal.aborted)
                     return;
                 if (!manager) {
@@ -121,7 +122,7 @@ export function registerMemoryWhisperer(api, runtime, config, typesafe, diagnost
                     return;
                 }
                 const search = await searchMemory(manager, queries, {
-                    corpora, signal, apiKey, timeoutMs: typesafe.timeoutMs, conversation, asOf,
+                    corpora, signal, apiKey, timeoutMs: typesafe.timeoutMs, conversation, asOf, timings: measurement,
                     minUsefulness: config.minUsefulness, maxResults: 4, excludedPassages: state.recent,
                     onCandidates: observation => {
                         measurement.retrievalMs = observation.retrievalMs;

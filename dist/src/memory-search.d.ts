@@ -1,10 +1,11 @@
 import type { CorpusMemorySearchResult, CorpusSearchOptions } from "./contracts.js";
 import type { QueryConversation, QueryPair } from "./query-contract.js";
+import { type RetrievalTimings } from "./retrieval-timing.js";
 export type MemoryCandidateManager = {
     searchCandidates(queries: QueryPair, options: CorpusSearchOptions): Promise<CorpusMemorySearchResult[]>;
 };
 export declare function memoryPassageId(text: string): string;
-export type MemorySearchObservation = {
+export type MemorySearchObservation = RetrievalTimings & {
     retrievalMs: number;
     judgeMs: number;
     candidates: number;

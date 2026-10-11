@@ -18,6 +18,7 @@ import { abortable } from "./abortable.js";
 import { RetrievalTelemetry } from "./retrieval-telemetry.js";
 import { trainingCandidates } from "./training-candidates.js";
 import { expandSessionSearchHit, renderMemoryPassage } from "./memory-passage.js";
+import { startTiming, timeStage, vectorTrace, vectorParts, unaccounted } from "./retrieval-timing.js";
 export { expandSessionSearchHit } from "./memory-passage.js";
 const DEFAULT_READ_LINES = 120;
 const MAX_READ_CHARS = 12_000;
@@ -304,10 +305,12 @@ export class QmdMemoryManager {
     async #refreshSessionMetadata() {
         const sessions = this.#sessions;
         if (!sessions)
-            return;
+            return false;
         const mtimeNs = await this.#manifestMtimeNs(sessions.manifestPath);
-        if (mtimeNs !== this.#sessionManifestMtimeNs)
-            await this.#reloadSessionMetadata();
+        if (mtimeNs === this.#sessionManifestMtimeNs)
+            return false;
+        await this.#reloadSessionMetadata();
+        return true;
     }
     #startWatcher() {
         const paths = [...new Set([...this.#sources.values()]
@@ -833,34 +836,57 @@ export class QmdMemoryManager {
     }
     /** Shared discovery: exact trained recipe, scoped before either retrieval lane. */
     async searchCandidates(queries, opts) {
-        return this.#enqueue(async () => {
-            opts.signal?.throwIfAborted();
-            const collections = this.#collectionNames(opts.corpora);
-            if (!collections.length)
-                return [];
-            if (this.#sessions && collections.includes(this.#sessions.collection))
-                await this.#refreshSessionMetadata();
-            const sessions = this.#sessions;
-            let allowedPaths = opts.sessionFilter && sessions && collections.includes(sessions.collection)
-                ? sessionAllowedPaths(this.#sessionMetadata, sessions.collection, opts.sessionFilter) : undefined;
-            if (collections.includes(EXTRACTED_COLLECTION)) {
-                allowedPaths = { ...allowedPaths, [EXTRACTED_COLLECTION]: this.#currentExtracted(undefined, opts.sessionFilter).map(extractedPath) };
-            }
-            const store = await this.#getAnalysisStore();
-            const hits = new Map();
-            // Serialize native QMD work. Cancellation prevents further queries/collections.
-            for (const lane of ["lex", "vec"]) {
+        const { timings, signal } = opts;
+        const endQueueWait = startTiming("queueWaitMs", timings, signal);
+        try {
+            return await this.#enqueue(async () => {
+                endQueueWait();
                 opts.signal?.throwIfAborted();
-                for (const hit of await trainingCandidates(store, queries[lane], collections, lane, opts.signal, allowedPaths)) {
-                    const key = JSON.stringify([hit.file, hit.bestChunkPos, hit.bestChunk]);
-                    if (!hits.has(key))
-                        hits.set(key, { file: hit.file, body: hit.body, bestChunk: hit.bestChunk,
-                            chunkPos: hit.bestChunkPos, chunkLen: hit.bestChunk.length, displayPath: hit.file, score: hit.score });
+                const collections = this.#collectionNames(opts.corpora);
+                if (!collections.length)
+                    return [];
+                const allowedPaths = await timeStage("metadataMs", timings, signal, async () => {
+                    if (this.#sessions && collections.includes(this.#sessions.collection)) {
+                        const reloaded = await this.#refreshSessionMetadata();
+                        if (timings && !signal?.aborted)
+                            timings.metadataReloads = Number(reloaded);
+                    }
+                    const sessions = this.#sessions;
+                    let allowed = opts.sessionFilter && sessions && collections.includes(sessions.collection)
+                        ? sessionAllowedPaths(this.#sessionMetadata, sessions.collection, opts.sessionFilter) : undefined;
+                    if (collections.includes(EXTRACTED_COLLECTION)) {
+                        allowed = { ...allowed, [EXTRACTED_COLLECTION]: this.#currentExtracted(undefined, opts.sessionFilter).map(extractedPath) };
+                    }
+                    return allowed;
+                });
+                const store = await timeStage("storeSetupMs", timings, signal, () => this.#getAnalysisStore());
+                const hits = new Map();
+                // Serialize native QMD work. Cancellation prevents further queries/collections.
+                for (const lane of ["lex", "vec"]) {
+                    opts.signal?.throwIfAborted();
+                    let candidates;
+                    try {
+                        candidates = await timeStage(lane === "lex" ? "bm25Ms" : "vectorMs", timings, signal, () => trainingCandidates(store, queries[lane], collections, lane, opts.signal, allowedPaths, lane === "vec" ? vectorTrace(timings, signal) : undefined));
+                    }
+                    finally {
+                        if (lane === "vec" && timings?.vectorMs !== undefined) {
+                            timings.vectorOtherMs = unaccounted(timings.vectorMs, timings, vectorParts);
+                        }
+                    }
+                    for (const hit of candidates) {
+                        const key = JSON.stringify([hit.file, hit.bestChunkPos, hit.bestChunk]);
+                        if (!hits.has(key))
+                            hits.set(key, { file: hit.file, body: hit.body, bestChunk: hit.bestChunk,
+                                chunkPos: hit.bestChunkPos, chunkLen: hit.bestChunk.length, displayPath: hit.file, score: hit.score });
+                    }
                 }
-            }
-            opts.signal?.throwIfAborted();
-            return this.#renderSearchHits([...hits.values()], store, opts, true);
-        });
+                opts.signal?.throwIfAborted();
+                return timeStage("passageMs", timings, signal, () => this.#renderSearchHits([...hits.values()], store, opts, true));
+            });
+        }
+        finally {
+            endQueueWait();
+        }
     }
     async #renderSearchHits(hits, store, opts, whisperer = false) {
         const tokenizer = store.internal?.llm;

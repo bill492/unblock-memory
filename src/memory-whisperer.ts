@@ -7,6 +7,7 @@ import { ApiQueryGenerator, QueryApiError, queryConversation } from "./query-gen
 import { judgeTrainingInput, TRAINING_GATE_THRESHOLD } from "./training-gate.js";
 import { QueryInputBudgetError, type QueryPair } from "./query-contract.js";
 import { searchMemory, memoryPassageId, type MemoryCandidateManager } from "./memory-search.js";
+import { timeStage } from "./retrieval-timing.js";
 
 type MemoryWhispererRuntime = {
   getMemorySearchManager(params: { cfg: OpenClawConfig; agentId: string }): Promise<{
@@ -77,7 +78,7 @@ export function registerMemoryWhisperer(
     const run = async () => {
       const conversation = queryConversation(event.prompt, event.messages);
       stage = "credentials";
-      const apiKey = await resolveTypeSafeApiKey(typesafe);
+      const apiKey = await timeStage("setupMs", measurement, signal, () => resolveTypeSafeApiKey(typesafe));
       if (signal.aborted) return;
       if (!apiKey) { reason = "missing_key"; diagnostics?.record(agentId, "memory", "missing_key"); return; }
       const gateStarted = performance.now();
@@ -125,11 +126,12 @@ export function registerMemoryWhisperer(
           measurement.generationMs = performance.now() - generationStarted;
         }
         stage = "retrieval";
-        const { manager } = await runtime.getMemorySearchManager({ cfg: api.config, agentId });
+        const { manager } = await timeStage("setupMs", measurement, signal,
+          () => runtime.getMemorySearchManager({ cfg: api.config, agentId }));
         if (signal.aborted) return;
         if (!manager) { reason = "unavailable"; diagnostics?.record(agentId, "memory", "unavailable"); return; }
         const search = await searchMemory(manager, queries, {
-          corpora, signal, apiKey, timeoutMs: typesafe.timeoutMs, conversation, asOf,
+          corpora, signal, apiKey, timeoutMs: typesafe.timeoutMs, conversation, asOf, timings: measurement,
           minUsefulness: config.minUsefulness, maxResults: 4, excludedPassages: state.recent,
           onCandidates: observation => {
             measurement.retrievalMs = observation.retrievalMs;

@@ -3,6 +3,7 @@ import type { CorpusMemorySearchResult, CorpusSearchOptions } from "./contracts.
 import type { QueryConversation, QueryPair } from "./query-contract.js";
 import { MEMORY_PASSAGE_CHARS, duplicateMemoryPassage } from "./memory-passage.js";
 import { judgeMemoryPassage, memoryUsefulnessRequest } from "./typesafe.js";
+import { startTiming, retrievalParts, unaccounted, type RetrievalTimings } from "./retrieval-timing.js";
 
 export type MemoryCandidateManager = {
   searchCandidates(queries: QueryPair, options: CorpusSearchOptions): Promise<CorpusMemorySearchResult[]>;
@@ -12,7 +13,7 @@ export function memoryPassageId(text: string): string {
   return createHash("sha256").update(text.replace(/\s+/gu, " ").trim()).digest("hex");
 }
 
-export type MemorySearchObservation = {
+export type MemorySearchObservation = RetrievalTimings & {
   retrievalMs: number; judgeMs: number; candidates: number; eligible: number;
   requestsSucceeded: number; requestsFailed: number;
 };
@@ -27,49 +28,62 @@ export async function searchMemory(manager: MemoryCandidateManager, queries: Que
   const { signal } = options;
   signal?.throwIfAborted();
   const asOf = options.asOf ?? new Date().toISOString();
-  const started = performance.now();
-  const hits = await manager.searchCandidates(queries, {
-    corpora: options.corpora, sessionFilter: options.sessionFilter, requestContext: options.requestContext,
-    sources: options.sources, signal, maxSnippetChars: MEMORY_PASSAGE_CHARS,
-  });
+  const timings = options.timings ?? {};
+  const endRetrieval = startTiming("retrievalMs", timings, signal);
+  let hits: CorpusMemorySearchResult[];
+  try {
+    hits = await manager.searchCandidates(queries, {
+      corpora: options.corpora, sessionFilter: options.sessionFilter, requestContext: options.requestContext,
+      sources: options.sources, signal, maxSnippetChars: MEMORY_PASSAGE_CHARS, timings,
+    });
+  } finally {
+    endRetrieval();
+    if (timings.retrievalMs !== undefined) timings.retrievalOtherMs = unaccounted(timings.retrievalMs, timings, retrievalParts);
+  }
   signal?.throwIfAborted();
-  const observation: MemorySearchObservation = { retrievalMs: performance.now() - started, judgeMs: 0,
+  const observation: MemorySearchObservation = { retrievalMs: timings.retrievalMs ?? 0, judgeMs: 0,
     candidates: hits.length, eligible: 0, requestsSucceeded: 0, requestsFailed: 0 };
   const candidates: CorpusMemorySearchResult[] = [];
-  for (const hit of hits) {
-    // Defense in depth before disclosing passages to the external judge.
-    if (options.corpora && !options.corpora.includes("all") && !options.corpora.includes(hit.corpus)) continue;
-    const excerpt = hit.snippet.trim();
-    if (!excerpt || excerpt.length > MEMORY_PASSAGE_CHARS || options.excludedPassages?.has(memoryPassageId(excerpt)) ||
-      duplicateMemoryPassage({ ...hit, text: excerpt }, candidates.map(candidate => ({ ...candidate, text: candidate.snippet })))) continue;
-    candidates.push({ ...hit, snippet: excerpt });
-  }
+  const endCandidatePrep = startTiming("candidatePrepMs", timings, signal);
+  try {
+    for (const hit of hits) {
+      // Defense in depth before disclosing passages to the external judge.
+      if (options.corpora && !options.corpora.includes("all") && !options.corpora.includes(hit.corpus)) continue;
+      const excerpt = hit.snippet.trim();
+      if (!excerpt || excerpt.length > MEMORY_PASSAGE_CHARS || options.excludedPassages?.has(memoryPassageId(excerpt)) ||
+        duplicateMemoryPassage({ ...hit, text: excerpt }, candidates.map(candidate => ({ ...candidate, text: candidate.snippet })))) continue;
+      candidates.push({ ...hit, snippet: excerpt });
+    }
+  } finally { endCandidatePrep(); }
   observation.eligible = candidates.length;
   options.onCandidates?.(observation);
-  const judgeStarted = performance.now();
-  const judged = (await Promise.all(candidates.map(async (hit, candidateIndex) => {
-    const requestStarted = performance.now();
-    try {
-      const { probability } = await judgeMemoryPassage(memoryUsefulnessRequest(options.conversation, {
-        excerpt: hit.snippet, corpus: hit.corpus, sourcePath: hit.path,
-        dates: [...new Set(hit.sessionMessages?.flatMap(message => message.timestamp ? [message.timestamp] : [])
-          ?? (hit.messageTimestamp ? [hit.messageTimestamp] : []))],
-      }, asOf), options);
-      signal?.throwIfAborted();
-      observation.requestsSucceeded++;
-      options.onJudgment?.({ candidateIndex, elapsedMs: performance.now() - requestStarted });
-      // Discovery reciprocal ranks are not vector similarity or usefulness.
-      const { vectorScore: _vectorScore, textScore: _textScore, ...result } = hit;
-      return [{ ...result, score: probability }];
-    } catch (error) {
-      if (signal?.aborted) return [];
-      observation.requestsFailed++;
-      options.onJudgment?.({ candidateIndex, elapsedMs: performance.now() - requestStarted, error });
-      return [];
-    }
-  }))).flat();
+  const endJudge = startTiming("judgeMs", timings, signal);
+  let judged: CorpusMemorySearchResult[];
+  try {
+    judged = (await Promise.all(candidates.map(async (hit, candidateIndex) => {
+      const requestStarted = performance.now();
+      try {
+        const { probability } = await judgeMemoryPassage(memoryUsefulnessRequest(options.conversation, {
+          excerpt: hit.snippet, corpus: hit.corpus, sourcePath: hit.path,
+          dates: [...new Set(hit.sessionMessages?.flatMap(message => message.timestamp ? [message.timestamp] : [])
+            ?? (hit.messageTimestamp ? [hit.messageTimestamp] : []))],
+        }, asOf), options);
+        signal?.throwIfAborted();
+        observation.requestsSucceeded++;
+        options.onJudgment?.({ candidateIndex, elapsedMs: performance.now() - requestStarted });
+        // Discovery reciprocal ranks are not vector similarity or usefulness.
+        const { vectorScore: _vectorScore, textScore: _textScore, ...result } = hit;
+        return [{ ...result, score: probability }];
+      } catch (error) {
+        if (signal?.aborted) return [];
+        observation.requestsFailed++;
+        options.onJudgment?.({ candidateIndex, elapsedMs: performance.now() - requestStarted, error });
+        return [];
+      }
+    }))).flat();
+  } finally { endJudge(); }
   signal?.throwIfAborted();
-  observation.judgeMs = performance.now() - judgeStarted;
-  return { ...observation, results: judged.filter(hit => hit.score >= (options.minUsefulness ?? 0.7))
+  observation.judgeMs = timings.judgeMs ?? 0;
+  return { ...timings, ...observation, results: judged.filter(hit => hit.score >= (options.minUsefulness ?? 0.7))
     .sort((a, b) => b.score - a.score).slice(0, options.maxResults ?? 5) };
 }

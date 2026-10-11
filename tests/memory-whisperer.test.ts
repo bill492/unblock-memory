@@ -566,9 +566,15 @@ test("retrieval deadline returns promptly and late hits cannot trigger TypeSafe"
   const h = harness([], { config: { timeoutMs: 20 }, search: () => pending.promise });
   assert.equal(await h.before(event, context), undefined);
   assert.equal(h.searches[0].options?.signal?.aborted, true);
+  const sample = h.diagnostics.snapshot("bill").telemetry.operations.memoryWhisperer!.slowestRecent[0]!;
+  assert.equal(sample.outcome, "timed_out");
+  assert.ok(sample.retrievalMs! > 0, "deadline keeps partial retrieval time even when work has not settled");
+  assert.equal(sample.judgeMs, undefined, "ranking never started");
   pending.resolve([hit("too late")]);
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(fetch.mock.callCount(), 1); // Only the recall gate, never late passage judgments.
+  assert.deepEqual(h.diagnostics.snapshot("bill").telemetry.operations.memoryWhisperer!.slowestRecent[0], sample,
+    "late work cannot rewrite an already recorded deadline sample");
 });
 
 test("pending judgments cannot survive session teardown, shutdown, or superseding turns", async t => {

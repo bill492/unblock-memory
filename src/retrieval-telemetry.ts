@@ -1,16 +1,20 @@
+import { timingFields, type RetrievalTimings } from "./retrieval-timing.js";
+
 type RetrievalOperation = "vector" | "memoryWhisperer" | "memorySearch";
 type RetrievalOutcome = "ok" | "partial" | "empty" | "failed" | "cancelled" | "timed_out" | "skipped";
-const fields = ["elapsedMs", "retrievalMs", "judgeMs", "gateMs", "generationMs", "candidates", "eligible", "results", "contextChars"] as const;
+const fields = ["elapsedMs", "retrievalMs", "judgeMs", "gateMs", "generationMs", ...timingFields,
+  "metadataReloads", "vectorScanAttempts", "candidates", "eligible", "results", "contextChars"] as const;
 type Field = typeof fields[number];
-export type RetrievalObservation = { outcome: RetrievalOutcome; elapsedMs: number } & Partial<Record<Field, number>>;
+export type RetrievalObservation = { outcome: RetrievalOutcome; elapsedMs: number } & RetrievalTimings & Partial<Record<Field, number>>;
 type Entry = {
   calls: number;
   outcomes: Partial<Record<RetrievalOutcome, number>>;
   totals: Partial<Record<Field, { sum: number; samples: number }>>;
-  recent: Partial<Record<Field, number>>[];
+  recent: ({ outcome: RetrievalOutcome } & Partial<Record<Field, number>>)[];
 };
 
 const recentLimit = 256;
+const outcomes: readonly RetrievalOutcome[] = ["ok", "partial", "empty", "failed", "cancelled", "timed_out", "skipped"];
 const boundedAdd = (left: number, right: number) => Math.min(Number.MAX_SAFE_INTEGER, left + right);
 
 /** Only fixed operation/outcome names and nonnegative numbers enter this store. */
@@ -18,11 +22,12 @@ export class RetrievalTelemetry {
   #entries = new Map<RetrievalOperation, Entry>();
 
   record(operation: RetrievalOperation, observation: RetrievalObservation): void {
+    if (!["vector", "memoryWhisperer", "memorySearch"].includes(operation) || !outcomes.includes(observation.outcome)) return;
     const entry = this.#entries.get(operation) ?? { calls: 0, outcomes: {}, totals: {}, recent: [] } satisfies Entry;
     this.#entries.set(operation, entry);
     entry.calls = boundedAdd(entry.calls, 1);
     entry.outcomes[observation.outcome] = boundedAdd(entry.outcomes[observation.outcome] ?? 0, 1);
-    const sample: Partial<Record<Field, number>> = {};
+    const sample: Entry["recent"][number] = { outcome: observation.outcome };
     for (const field of fields) {
       const value = observation[field];
       if (value === undefined || !Number.isFinite(value) || value < 0) continue;
@@ -40,6 +45,8 @@ export class RetrievalTelemetry {
       operations: Object.fromEntries([...this.#entries].map(([operation, entry]) => [operation, {
         calls: entry.calls,
         outcomes: { ...entry.outcomes },
+        slowestRecent: entry.recent.filter(sample => sample.elapsedMs !== undefined)
+          .toSorted((a, b) => b.elapsedMs! - a.elapsedMs!).slice(0, 5).map(sample => ({ ...sample })),
         measurements: Object.fromEntries(fields.map(field => {
           const values = entry.recent.flatMap(sample => sample[field] === undefined ? [] : [sample[field]!]).sort((a, b) => a - b);
           const percentile = (fraction: number) => values.length ? values[Math.ceil(values.length * fraction) - 1] : null;

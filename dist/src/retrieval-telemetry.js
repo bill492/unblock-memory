@@ -1,15 +1,20 @@
-const fields = ["elapsedMs", "retrievalMs", "judgeMs", "gateMs", "generationMs", "candidates", "eligible", "results", "contextChars"];
+import { timingFields } from "./retrieval-timing.js";
+const fields = ["elapsedMs", "retrievalMs", "judgeMs", "gateMs", "generationMs", ...timingFields,
+    "metadataReloads", "vectorScanAttempts", "candidates", "eligible", "results", "contextChars"];
 const recentLimit = 256;
+const outcomes = ["ok", "partial", "empty", "failed", "cancelled", "timed_out", "skipped"];
 const boundedAdd = (left, right) => Math.min(Number.MAX_SAFE_INTEGER, left + right);
 /** Only fixed operation/outcome names and nonnegative numbers enter this store. */
 export class RetrievalTelemetry {
     #entries = new Map();
     record(operation, observation) {
+        if (!["vector", "memoryWhisperer", "memorySearch"].includes(operation) || !outcomes.includes(observation.outcome))
+            return;
         const entry = this.#entries.get(operation) ?? { calls: 0, outcomes: {}, totals: {}, recent: [] };
         this.#entries.set(operation, entry);
         entry.calls = boundedAdd(entry.calls, 1);
         entry.outcomes[observation.outcome] = boundedAdd(entry.outcomes[observation.outcome] ?? 0, 1);
-        const sample = {};
+        const sample = { outcome: observation.outcome };
         for (const field of fields) {
             const value = observation[field];
             if (value === undefined || !Number.isFinite(value) || value < 0)
@@ -28,6 +33,8 @@ export class RetrievalTelemetry {
             operations: Object.fromEntries([...this.#entries].map(([operation, entry]) => [operation, {
                     calls: entry.calls,
                     outcomes: { ...entry.outcomes },
+                    slowestRecent: entry.recent.filter(sample => sample.elapsedMs !== undefined)
+                        .toSorted((a, b) => b.elapsedMs - a.elapsedMs).slice(0, 5).map(sample => ({ ...sample })),
                     measurements: Object.fromEntries(fields.map(field => {
                         const values = entry.recent.flatMap(sample => sample[field] === undefined ? [] : [sample[field]]).sort((a, b) => a - b);
                         const percentile = (fraction) => values.length ? values[Math.ceil(values.length * fraction) - 1] : null;

@@ -118,6 +118,7 @@ function createSearchTool(runtime: QmdMemoryRuntime, ctx: OpenClawPluginToolCont
           return jsonResult({ results: [], error: "TypeSafe API key not configured or TypeSafe disabled" });
         }
         const { manager, error } = await runtime.getMemorySearchManager(active);
+        measurement.setupMs = performance.now() - started;
         if (!manager) return jsonResult({ results: [], error: error ?? "memory unavailable" });
         const search = await searchMemory(manager, queries, {
           corpora: corpora?.map((corpus) => corpus.trim()),
@@ -125,7 +126,7 @@ function createSearchTool(runtime: QmdMemoryRuntime, ctx: OpenClawPluginToolCont
           maxResults,
           minUsefulness,
           apiKey, timeoutMs: typesafe.timeoutMs, conversation,
-          signal,
+          signal, timings: measurement,
           requestContext: active.requestContext,
           onCandidates: ({ retrievalMs, candidates, eligible }) => {
             Object.assign(measurement, { retrievalMs, candidates, eligible });
@@ -156,6 +157,10 @@ function createSearchTool(runtime: QmdMemoryRuntime, ctx: OpenClawPluginToolCont
         throw error;
       } finally {
         measurement.elapsedMs = performance.now() - started;
+        measurement.setupMs ??= measurement.elapsedMs;
+        // Manual search is sequential. Whisperer stages overlap and cannot use this subtraction.
+        measurement.otherMs = Math.max(0, measurement.elapsedMs - measurement.setupMs -
+          (measurement.retrievalMs ?? 0) - (measurement.candidatePrepMs ?? 0) - (measurement.judgeMs ?? 0));
         if (signal?.aborted) measurement.outcome = signal.reason instanceof Error && signal.reason.name === "TimeoutError"
           ? "timed_out" : "cancelled";
         diagnostics.measureSearch(active.agentId, measurement);

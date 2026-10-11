@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdtemp, writeFile } from "node:fs/promises";
+import { setImmediate } from "node:timers/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createStore } from "@unblocklabs/qmd";
@@ -96,6 +97,7 @@ test("explicit two-query search retrieves, scopes, deduplicates and judges real 
     whisperers: { telemetry: { operations: Record<string, {
       calls: number; outcomes: Record<string, number>;
       measurements: Record<string, { samples: number; total: number }>;
+      slowestRecent: ({ outcome: string } & Partial<Record<string, number | string>>)[];
     }> } };
   } };
   const operations = snapshot.details.whisperers.telemetry.operations;
@@ -106,6 +108,13 @@ test("explicit two-query search retrieves, scopes, deduplicates and judges real 
   assert.equal(operations.memorySearch!.measurements.results!.total, 2);
   assert.equal(operations.memorySearch!.measurements.retrievalMs!.samples, 2);
   assert.equal(operations.memorySearch!.measurements.judgeMs!.samples, 2);
+  for (const stage of ["setupMs", "queueWaitMs", "metadataMs", "storeSetupMs", "bm25Ms", "vectorMs",
+    "embeddingMs", "vectorScanMs", "hydrationMs", "vectorMappingMs", "passageMs", "candidatePrepMs", "otherMs"]) {
+    assert.equal(operations.memorySearch!.measurements[stage]!.samples, 2, `${stage} reached real tool diagnostics`);
+  }
+  assert.ok(operations.memorySearch!.measurements.vectorScanAttempts!.total >= 2);
+  const slow = operations.memorySearch!.slowestRecent[0]!;
+  assert.ok(Number(slow.retrievalMs) >= Number(slow.queueWaitMs) + Number(slow.bm25Ms) + Number(slow.vectorMs));
   assert.equal(operations.memoryWhisperer, undefined, "manual search must not count as automatic recall");
   assert.ok(!JSON.stringify(operations).includes("Exactneedle"), "telemetry contains no query or evidence text");
   const calls = judged.length;
@@ -118,4 +127,33 @@ test("explicit two-query search retrieves, scopes, deduplicates and judges real 
   assert.equal(finalOperations.memorySearch!.calls, 5, "one observation per tool invocation, even on early failures");
   assert.deepEqual(finalOperations.memorySearch!.outcomes, { partial: 1, failed: 2, skipped: 1, cancelled: 1 });
   assert.equal(finalOperations.memorySearch!.measurements.elapsedMs!.samples, 5);
+
+  // A native embedding can outlive cancellation. Keep partial timing, send no
+  // passages, and preserve queue waiting for a second search behind that work.
+  let embeddingStartedResolve: () => void = () => {};
+  let releaseEmbeddingResolve: () => void = () => {};
+  const embeddingStarted = new Promise<void>(resolve => { embeddingStartedResolve = resolve; });
+  const releaseEmbedding = new Promise<void>(resolve => { releaseEmbeddingResolve = resolve; });
+  t.mock.method(qmd.internal.llm!, "embed", async () => {
+    embeddingStartedResolve();
+    await releaseEmbedding;
+    return { embedding: [1, 0], model };
+  });
+  const controller = new AbortController();
+  const cancelled = assert.rejects(tool.execute("mid-retrieval", input, controller.signal), { name: "AbortError" });
+  await embeddingStarted;
+  const queueController = new AbortController();
+  const queued = assert.rejects(tool.execute("queued", input, queueController.signal), { name: "AbortError" });
+  await setImmediate();
+  controller.abort();
+  queueController.abort();
+  releaseEmbeddingResolve();
+  await Promise.all([cancelled, queued]);
+  assert.equal(judged.length, calls, "cancelled discovery must not disclose passages");
+  const cancelledSnapshot = await diagnostics.execute("diagnostics", {}) as typeof snapshot;
+  const cancelledSearch = cancelledSnapshot.details.whisperers.telemetry.operations.memorySearch!;
+  assert.equal(cancelledSearch.outcomes.cancelled, 3);
+  assert.equal(cancelledSearch.measurements.retrievalMs!.samples, 4);
+  assert.equal(cancelledSearch.measurements.vectorMs!.samples, 3, "queued cancellation never entered vector retrieval");
+  assert.equal(cancelledSearch.measurements.judgeMs!.samples, 2, "unexecuted ranking is absent, not zero");
 });

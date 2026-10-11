@@ -62,6 +62,37 @@ export declare class QmdMemoryManager implements MemorySearchManagerContract {
                         empty?: number | undefined;
                         timed_out?: number | undefined;
                     };
+                    slowestRecent: {
+                        outcome: "ok" | "cancelled" | "partial" | "skipped" | "failed" | "empty" | "timed_out";
+                        setupMs?: number | undefined;
+                        queueWaitMs?: number | undefined;
+                        metadataMs?: number | undefined;
+                        storeSetupMs?: number | undefined;
+                        bm25Ms?: number | undefined;
+                        vectorMs?: number | undefined;
+                        vectorIndexCheckMs?: number | undefined;
+                        vectorScopeMs?: number | undefined;
+                        embeddingMs?: number | undefined;
+                        vectorScanMs?: number | undefined;
+                        hydrationMs?: number | undefined;
+                        vectorMappingMs?: number | undefined;
+                        vectorOtherMs?: number | undefined;
+                        passageMs?: number | undefined;
+                        candidatePrepMs?: number | undefined;
+                        retrievalOtherMs?: number | undefined;
+                        otherMs?: number | undefined;
+                        retrievalMs?: number | undefined;
+                        judgeMs?: number | undefined;
+                        metadataReloads?: number | undefined;
+                        vectorScanAttempts?: number | undefined;
+                        elapsedMs?: number | undefined;
+                        gateMs?: number | undefined;
+                        generationMs?: number | undefined;
+                        candidates?: number | undefined;
+                        eligible?: number | undefined;
+                        results?: number | undefined;
+                        contextChars?: number | undefined;
+                    }[];
                     measurements: {
                         [k: string]: {
                             total: number;
